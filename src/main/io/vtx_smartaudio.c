@@ -24,9 +24,14 @@
 #include <stdint.h>
 #include <string.h>
 #include <ctype.h>
+#include <math.h>
 
 #include "platform.h"
 
+// #define USE_VTX_SMARTAUDIO
+// #define USE_VTX_CONTROL
+// #define VTX_COMMON
+// #define USE_VTX_COMMON
 #if defined(USE_VTX_SMARTAUDIO) && defined(USE_VTX_CONTROL)
 
 #include "build/debug.h"
@@ -66,8 +71,9 @@ static serialPort_t *smartAudioSerialPort = NULL;
 smartAudioDevice_t saDevice;
 
 #if defined(USE_CMS) || defined(USE_VTX_COMMON)
+#define SA_POWERNAME_MAX_LEN 5
 const char * saPowerNames[VTX_SMARTAUDIO_POWER_COUNT+1] = {
-    "---", "25 ", "200", "500", "800",
+    "--- ", "25  ", "200 ", "500 ", "800 ",
 };
 #endif
 
@@ -104,6 +110,7 @@ enum {
 #define SA_DEVICE_CHVAL_TO_CHANNEL(val) ((val) % (uint8_t)8)
 #define SA_BANDCHAN_TO_DEVICE_CHVAL(band, channel) ((band) * (uint8_t)8 + (channel))
 
+#define SLOW_CONVERT_DBM_TO_MILLIWATTS(val) ((uint16_t)round(powf(10.0f, val/10.0f)))
 
 // Statistical counters, for user side trouble shooting.
 
@@ -118,10 +125,10 @@ smartAudioStat_t saStat = {
 };
 
 saPowerTable_t saPowerTable[VTX_SMARTAUDIO_POWER_COUNT] = {
-    {  25,   7,   0 },
-    { 200,  16,   1 },
-    { 500,  25,   2 },
-    { 800,  40,   3 },
+    {  7,   0 }, /* 25 mw */
+    { 16,   1 }, /* 200 mw */
+    { 25,   2 }, /* 500 mw */
+    { 40,   3 },/* 800 mw */
 };
 
 uint16_t saPowerValues[VTX_SMARTAUDIO_POWER_COUNT] = {
@@ -132,6 +139,7 @@ uint16_t saPowerValues[VTX_SMARTAUDIO_POWER_COUNT] = {
 
 smartAudioDevice_t saDevice = {
     .version = 0,
+    .subversion = 0,
     .channel = -1,
     .power = -1,
     .mode = 0,
@@ -184,7 +192,7 @@ static uint8_t CRC8(const uint8_t *data, const int8_t len)
 #ifdef USE_SMARTAUDIO_DPRINTF
 static void saPrintSettings(void)
 {
-    dprintf(("Current status: version: %d\r\n", saDevice.version));
+    dprintf(("Current status: version: %d.%d\r\n", saDevice.version, saDevice.subversion));
     dprintf(("  mode(0x%x): fmode=%s", saDevice.mode,  (saDevice.mode & 1) ? "freq" : "chan"));
     dprintf((" pit=%s ", (saDevice.mode & 2) ? "on " : "off"));
     dprintf((" inb=%s", (saDevice.mode & 4) ? "on " : "off"));
@@ -265,6 +273,26 @@ static uint8_t sa_outstanding = SA_CMD_NONE; // Outstanding command
 static uint8_t sa_osbuf[32]; // Outstanding comamnd frame for retransmission
 static int sa_oslen;         // And associate length
 
+#if defined(USE_CMS) || defined(USE_VTX_COMMON)
+void saQuickDirtyPowerNameConverter(int32_t value, const char* output){
+    uint32_t currentValue, remainingValue = value;
+    char *p = (char *)output + SA_POWERNAME_MAX_LEN;
+    *p-- = 0;
+
+    while (remainingValue > 9) {
+        currentValue = remainingValue;
+        remainingValue /= 10;
+
+        *p-- = (currentValue - (remainingValue * 10)) + '0';
+
+        if (p < output)
+            return;
+    }
+
+    *p = remainingValue + '0';
+}
+#endif
+
 static void saProcessResponse(uint8_t *buf, int len)
 {
     uint8_t resp = buf[0];
@@ -302,9 +330,34 @@ static void saProcessResponse(uint8_t *buf, int len)
         saDevice.power = buf[3];
         saDevice.mode = buf[4];
         saDevice.freq = (buf[5] << 8)|buf[6];
-        // XXX(fujin): Receive additional SA2.1 fields here for dBm based power level.
 
-        DEBUG_SET(DEBUG_SMARTAUDIO, 0, saDevice.version * 100 + saDevice.mode);
+        if (resp == SA_CMD_GET_SETTINGS_V21) {
+            saDevice.subversion = 1;
+            saDevice.powerDefinition.currentPower = buf[7];
+            saDevice.powerDefinition.accessibleLevelCount = buf[8];
+
+            saDevice.powerDefinition.levelDbm[0] = buf[9];
+            saPowerValues[0] = SLOW_CONVERT_DBM_TO_MILLIWATTS(buf[9]);
+            
+            saDevice.powerDefinition.levelDbm[1] = buf[10];
+            saPowerValues[0] = SLOW_CONVERT_DBM_TO_MILLIWATTS(buf[10]);
+
+            saDevice.powerDefinition.levelDbm[2] = buf[11];
+            saPowerValues[0] = SLOW_CONVERT_DBM_TO_MILLIWATTS(buf[11]);
+
+            saDevice.powerDefinition.levelDbm[3] = buf[12];
+            saPowerValues[0] = SLOW_CONVERT_DBM_TO_MILLIWATTS(buf[12]);
+        
+            #if defined(USE_CMS) || defined(USE_VTX_COMMON)
+            // not safe !!!!
+            saQuickDirtyPowerNameConverter(saPowerValues[0], saPowerNames[1]);
+            saQuickDirtyPowerNameConverter(saPowerValues[2], saPowerNames[2]);
+            saQuickDirtyPowerNameConverter(saPowerValues[3], saPowerNames[3]);
+            saQuickDirtyPowerNameConverter(saPowerValues[4], saPowerNames[4]);
+            #endif
+        }
+
+        DEBUG_SET(DEBUG_SMARTAUDIO, 0, saDevice.version * 100 + saDevice.subversion * 10 + saDevice.mode);
         DEBUG_SET(DEBUG_SMARTAUDIO, 1, saDevice.channel);
         DEBUG_SET(DEBUG_SMARTAUDIO, 2, saDevice.freq);
         DEBUG_SET(DEBUG_SMARTAUDIO, 3, saDevice.power);
@@ -660,11 +713,21 @@ static void saDevSetPowerByIndex(uint8_t index)
         return;
     }
 
-    if (index >= VTX_SMARTAUDIO_POWER_COUNT) {
-        return;
+    if (saDevice.version == 1 || (saDevice.version == 2 && saDevice.subversion == 0))
+    {
+        if (index >= VTX_SMARTAUDIO_POWER_COUNT) {
+            return;
+        }
+
+        buf[4] =  (saDevice.version == 1) ? saPowerTable[index].valueV1 : saPowerTable[index].valueV2;
+    }
+    else // version 
+    {
+        if (index >= saDevice.powerDefinition.accessibleLevelCount)
+            return;
+        buf[4] = saDevice.powerDefinition.levelDbm[index];
     }
 
-    buf[4] = (saDevice.version == 1) ? saPowerTable[index].valueV1 : saPowerTable[index].valueV2;
     buf[5] = CRC8(buf, 5);
     saQueueCmd(buf, 6);
 }

@@ -62,17 +62,26 @@
 
 // For generic API use, but here for now
 
+typedef struct
+{
+    uint8_t currentPower;
+    uint8_t accessibleLevelCount;
+    uint8_t levelDbm[4];
+} smartAudio21PowerManagement_t;
+
 typedef struct smartAudioDevice_s {
     int8_t version;
+    int8_t subversion;
     int8_t channel;
     int8_t power;
     int8_t mode;
     uint16_t freq;
     uint16_t orfreq;
+
+    smartAudio21PowerManagement_t powerDefinition;
 } smartAudioDevice_t;
 
 typedef struct saPowerTable_s {
-    int rfpower;
     int16_t valueV1;
     int16_t valueV2;
 } saPowerTable_t;
